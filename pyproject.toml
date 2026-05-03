@@ -20,6 +20,7 @@ dependencies = [
     "rich>=13.7.0",
     "schedule>=1.2.0",
     "textblob>=0.18.0",
+    "scikit-learn>=1.4.0",
 ]
 
 [project.scripts]

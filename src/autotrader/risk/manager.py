@@ -1,4 +1,8 @@
-"""Risk Management Guardrail — must approve every trade before execution."""
+"""Risk Management Guardrail — must approve every trade before execution.
+
+Fee-aware: rejects trades where expected profit < round-trip Coinbase fees.
+Uses ATR-based position sizing and trailing stop-losses.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from dataclasses import dataclass
 from autotrader.config import Config
 from autotrader.logging.audit import AuditLogger
 from autotrader.strategy.signals import SignalAction, TradeSignal
+from autotrader.tools.indicators import IndicatorSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +25,13 @@ class RiskDecision:
     quantity: float
     stop_loss: float
     take_profit: float
+    trailing_stop_pct: float
+    estimated_fee_usd: float
     reason: str
 
 
 class RiskManager:
-    """Enforces position sizing, stop-loss/take-profit, and the kill switch.
+    """Enforces position sizing, stop-loss/take-profit, fee checks, and the kill switch.
 
     Every trade signal must pass through ``evaluate()`` before execution.
     """
@@ -42,6 +49,7 @@ class RiskManager:
         signal: TradeSignal,
         wallet_balance_usd: float,
         current_price: float,
+        snapshot: IndicatorSnapshot | None = None,
     ) -> RiskDecision:
         """Check the signal against all risk rules and return a decision."""
 
@@ -52,6 +60,8 @@ class RiskManager:
                 quantity=0,
                 stop_loss=0,
                 take_profit=0,
+                trailing_stop_pct=0,
+                estimated_fee_usd=0,
                 reason="Kill switch is active — all trading halted",
             )
 
@@ -74,6 +84,8 @@ class RiskManager:
                 quantity=0,
                 stop_loss=0,
                 take_profit=0,
+                trailing_stop_pct=0,
+                estimated_fee_usd=0,
                 reason=(
                     f"Kill switch triggered: daily loss ${daily_pnl:.2f} > limit -${loss_limit:.2f}"
                 ),
@@ -86,11 +98,22 @@ class RiskManager:
                 quantity=0,
                 stop_loss=0,
                 take_profit=0,
+                trailing_stop_pct=0,
+                estimated_fee_usd=0,
                 reason="Signal is HOLD — no action required",
             )
 
-        # 3. Position sizing (max % of wallet)
+        # 3. Position sizing — ATR-adjusted if available
         max_trade_usd = wallet_balance_usd * self._config.max_position_pct
+
+        if snapshot is not None and snapshot.atr_pct > 0:
+            # Higher volatility → smaller position (inverse ATR scaling)
+            # Base ATR assumption: 2% daily → scale factor 1.0
+            atr_base = 0.02
+            vol_ratio = atr_base / max(snapshot.atr_pct, 0.001)
+            vol_scale = max(0.3, min(vol_ratio * self._config.atr_position_scalar, 2.0))
+            max_trade_usd *= vol_scale
+
         quantity = max_trade_usd / current_price if current_price > 0 else 0
 
         if quantity <= 0:
@@ -99,35 +122,79 @@ class RiskManager:
                 quantity=0,
                 stop_loss=0,
                 take_profit=0,
+                trailing_stop_pct=0,
+                estimated_fee_usd=0,
                 reason="Computed position size is zero or negative",
             )
 
-        # 4. Stop-loss / take-profit
+        # 4. Fee calculation
+        entry_fee = max_trade_usd * self._config.taker_fee_pct
+        exit_fee = max_trade_usd * self._config.taker_fee_pct
+        total_fees = entry_fee + exit_fee
+
+        # 5. Stop-loss / take-profit — ATR-based when available
         if signal.action == SignalAction.BUY:
-            stop_loss = current_price * (1 - self._config.default_stop_loss_pct)
-            take_profit = current_price * (1 + self._config.default_take_profit_pct)
+            if snapshot is not None and snapshot.atr_pct > 0:
+                # Dynamic SL/TP based on ATR: tighter in low-vol, wider in high-vol
+                sl_distance = max(snapshot.atr_pct * 1.5, self._config.default_stop_loss_pct)
+                tp_distance = max(snapshot.atr_pct * 3.0, self._config.default_take_profit_pct)
+            else:
+                sl_distance = self._config.default_stop_loss_pct
+                tp_distance = self._config.default_take_profit_pct
+
+            stop_loss = current_price * (1 - sl_distance)
+            take_profit = current_price * (1 + tp_distance)
+
+            # Fee-aware: ensure take-profit covers round-trip fees + min profit
+            min_tp_distance = (
+                self._config.round_trip_fee_pct + self._config.min_profit_after_fees_pct
+            )
+            if tp_distance < min_tp_distance:
+                take_profit = current_price * (1 + min_tp_distance)
         else:
+            # Sell-side SL/TP (for shorts — not used in spot, but included for completeness)
             stop_loss = current_price * (1 + self._config.default_stop_loss_pct)
             take_profit = current_price * (1 - self._config.default_take_profit_pct)
 
-        # 5. Minimum confidence gate
-        min_confidence = 0.50
+        # 6. Minimum confidence gate
+        min_confidence = self._config.min_signal_confidence
         if signal.confidence < min_confidence:
             return RiskDecision(
                 approved=False,
                 quantity=0,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                trailing_stop_pct=self._config.trailing_stop_pct,
+                estimated_fee_usd=total_fees,
                 reason=f"Signal confidence {signal.confidence:.2f} below minimum {min_confidence}",
             )
 
+        # 7. Fee profitability check — reject if expected profit < fees
+        if signal.action == SignalAction.BUY:
+            expected_profit_pct = (take_profit / current_price - 1)
+            if expected_profit_pct <= self._config.round_trip_fee_pct:
+                return RiskDecision(
+                    approved=False,
+                    quantity=0,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    trailing_stop_pct=self._config.trailing_stop_pct,
+                    estimated_fee_usd=total_fees,
+                    reason=(
+                        f"Expected profit {expected_profit_pct:.2%} does not exceed "
+                        f"round-trip fee {self._config.round_trip_fee_pct:.2%}"
+                    ),
+                )
+
         logger.info(
-            "RISK APPROVED | %s %s | qty=%.6f | SL=$%.2f TP=$%.2f | confidence=%.2f",
+            "RISK APPROVED | %s %s | qty=%.6f | SL=$%.2f TP=$%.2f | "
+            "fees=$%.2f | confidence=%.2f",
             signal.action.value,
             signal.pair,
             quantity,
             stop_loss,
             take_profit,
+            total_fees,
             signal.confidence,
         )
         return RiskDecision(
@@ -135,6 +202,8 @@ class RiskManager:
             quantity=quantity,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            trailing_stop_pct=self._config.trailing_stop_pct,
+            estimated_fee_usd=total_fees,
             reason="Trade approved by risk manager",
         )
 

@@ -41,6 +41,7 @@ class AuditLogger:
                 reasoning   TEXT,
                 stop_loss   REAL,
                 take_profit REAL,
+                fee_usd     REAL    DEFAULT 0.0,
                 status      TEXT    DEFAULT 'filled'
             );
 
@@ -56,7 +57,8 @@ class AuditLogger:
             CREATE TABLE IF NOT EXISTS daily_pnl (
                 date        TEXT    PRIMARY KEY,
                 realized_pnl REAL  DEFAULT 0.0,
-                trade_count  INTEGER DEFAULT 0
+                trade_count  INTEGER DEFAULT 0,
+                total_fees   REAL  DEFAULT 0.0
             );
             """
         )
@@ -78,14 +80,15 @@ class AuditLogger:
         reasoning: str = "",
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
+        fee_usd: float = 0.0,
     ) -> int:
         now = datetime.now(timezone.utc).isoformat()
         cur = self._conn.execute(
             """
             INSERT INTO trades
                 (timestamp, pair, side, quantity, price, order_id,
-                 strategy, confidence, reasoning, stop_loss, take_profit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 strategy, confidence, reasoning, stop_loss, take_profit, fee_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 now,
@@ -99,12 +102,13 @@ class AuditLogger:
                 reasoning,
                 stop_loss,
                 take_profit,
+                fee_usd,
             ),
         )
         self._conn.commit()
         trade_id = cur.lastrowid or 0
         logger.info(
-            "TRADE LOGGED | %s %s %.6f %s @ $%.2f | strategy=%s confidence=%.2f",
+            "TRADE LOGGED | %s %s %.6f %s @ $%.2f | strategy=%s confidence=%.2f fee=$%.2f",
             side,
             pair,
             quantity,
@@ -112,6 +116,7 @@ class AuditLogger:
             price,
             strategy,
             confidence,
+            fee_usd,
         )
         return trade_id
 

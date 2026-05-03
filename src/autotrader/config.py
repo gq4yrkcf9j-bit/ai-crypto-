@@ -145,6 +145,15 @@ class Config(BaseSettings):
     )
     scan_interval_seconds: int = Field(default=60, description="Seconds between scan cycles")
 
+    # --- Coinbase Fee Schedule (maker/taker by 30-day volume tier) ---
+    # Defaults are the lowest tier ($0-$10K). Adjust to your actual tier.
+    taker_fee_pct: float = Field(
+        default=0.006, description="Taker fee as decimal (0.6% = 0.006)"
+    )
+    maker_fee_pct: float = Field(
+        default=0.004, description="Maker fee as decimal (0.4% = 0.004)"
+    )
+
     # --- Risk Management ---
     max_position_pct: float = Field(
         default=0.02, description="Max % of wallet per trade (2% default)"
@@ -158,6 +167,15 @@ class Config(BaseSettings):
     default_take_profit_pct: float = Field(
         default=0.06, description="Default take-profit % above entry (6%)"
     )
+    min_profit_after_fees_pct: float = Field(
+        default=0.005, description="Min expected profit after fees to enter trade (0.5%)"
+    )
+    trailing_stop_pct: float = Field(
+        default=0.02, description="Trailing stop-loss distance (2% below high-water mark)"
+    )
+    atr_position_scalar: float = Field(
+        default=1.0, description="Scale position size inversely with ATR volatility"
+    )
 
     # --- Strategy Parameters ---
     short_ma_period: int = Field(default=20, description="Short moving average period")
@@ -168,6 +186,18 @@ class Config(BaseSettings):
     sentiment_threshold: float = Field(
         default=0.6, description="Min sentiment score to validate signals"
     )
+    min_signal_confidence: float = Field(
+        default=0.55, description="Min ensemble confidence to act"
+    )
+    ml_model_weight: float = Field(
+        default=0.40, description="Weight of ML model in ensemble signal (0-1)"
+    )
+    technical_weight: float = Field(
+        default=0.40, description="Weight of technical signals in ensemble (0-1)"
+    )
+    sentiment_weight: float = Field(
+        default=0.20, description="Weight of sentiment in ensemble signal (0-1)"
+    )
 
     # --- Logging ---
     db_path: str = Field(default="data/trades.db", description="SQLite database path for audit log")
@@ -176,3 +206,8 @@ class Config(BaseSettings):
     @property
     def has_credentials(self) -> bool:
         return bool(self.coinbase_api_key and self.coinbase_api_secret)
+
+    @property
+    def round_trip_fee_pct(self) -> float:
+        """Total round-trip fee: buy-side taker + sell-side taker."""
+        return self.taker_fee_pct * 2

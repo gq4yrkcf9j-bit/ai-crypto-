@@ -23,10 +23,27 @@ class Position:
     take_profit: float
     opened_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     order_id: str = ""
+    trailing_stop_pct: float = 0.02
+    high_water_mark: float = 0.0  # highest price since entry
+    entry_fee_usd: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.high_water_mark <= 0:
+            self.high_water_mark = self.entry_price
 
     @property
     def notional_value(self) -> float:
         return self.quantity * self.entry_price
+
+    @property
+    def trailing_stop_price(self) -> float:
+        """Dynamic stop-loss that ratchets up with price."""
+        return self.high_water_mark * (1 - self.trailing_stop_pct)
+
+    def update_high_water(self, current_price: float) -> None:
+        """Update high-water mark and tighten trailing stop."""
+        if current_price > self.high_water_mark:
+            self.high_water_mark = current_price
 
 
 @dataclass

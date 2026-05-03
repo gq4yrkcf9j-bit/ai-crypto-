@@ -1,4 +1,7 @@
-"""Broker Tool — executes trades via Coinbase Advanced Trade API."""
+"""Broker Tool — executes trades via Coinbase Advanced Trade API.
+
+Paper mode simulates realistic order fills including Coinbase fee deductions.
+"""
 
 from __future__ import annotations
 
@@ -23,11 +26,15 @@ class OrderResult:
     side: str
     quantity: float
     price: float
+    fee_usd: float = 0.0
     message: str = ""
 
 
 class BrokerTool:
-    """Places and manages orders on Coinbase (or simulates them in paper mode)."""
+    """Places and manages orders on Coinbase (or simulates them in paper mode).
+
+    Paper mode deducts realistic Coinbase taker fees from each trade.
+    """
 
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -39,6 +46,7 @@ class BrokerTool:
             )
         self._paper_balance: dict[str, float] = {"USD": 10_000.0}
         self._paper_positions: dict[str, float] = {}
+        self._total_fees_paid: float = 0.0
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -83,6 +91,10 @@ class BrokerTool:
             total += qty * price
         return total
 
+    @property
+    def total_fees_paid(self) -> float:
+        return self._total_fees_paid
+
     # ------------------------------------------------------------------ #
     #  Live orders (Coinbase)                                             #
     # ------------------------------------------------------------------ #
@@ -116,6 +128,7 @@ class BrokerTool:
                 side=side,
                 quantity=quantity,
                 price=0.0,  # filled price determined by market
+                fee_usd=0.0,  # actual fee reported by exchange
                 message=message,
             )
         except Exception as exc:
@@ -199,17 +212,19 @@ class BrokerTool:
             return {}
 
     # ------------------------------------------------------------------ #
-    #  Paper trading simulation                                           #
+    #  Paper trading simulation (fee-realistic)                           #
     # ------------------------------------------------------------------ #
     def _paper_market_order(
         self, pair: str, side: str, quantity: float, price: float
     ) -> OrderResult:
         base, quote = pair.split("-")
         cost = quantity * price
+        fee = cost * self._config.taker_fee_pct
         order_id = f"paper-{uuid.uuid4().hex[:12]}"
 
         if side == "buy":
-            if self._paper_balance.get(quote, 0) < cost:
+            total_cost = cost + fee
+            if self._paper_balance.get(quote, 0) < total_cost:
                 return OrderResult(
                     success=False,
                     order_id=order_id,
@@ -217,9 +232,10 @@ class BrokerTool:
                     side=side,
                     quantity=quantity,
                     price=price,
-                    message=f"Insufficient {quote} balance: need ${cost:.2f}",
+                    fee_usd=fee,
+                    message=f"Insufficient {quote} balance: need ${total_cost:.2f} (incl. fee)",
                 )
-            self._paper_balance[quote] = self._paper_balance.get(quote, 0) - cost
+            self._paper_balance[quote] = self._paper_balance.get(quote, 0) - total_cost
             self._paper_balance[base] = self._paper_balance.get(base, 0) + quantity
         else:
             if self._paper_balance.get(base, 0) < quantity:
@@ -230,18 +246,23 @@ class BrokerTool:
                     side=side,
                     quantity=quantity,
                     price=price,
+                    fee_usd=fee,
                     message=f"Insufficient {base} balance: have {self._paper_balance.get(base, 0)}",
                 )
+            proceeds = cost - fee
             self._paper_balance[base] = self._paper_balance.get(base, 0) - quantity
-            self._paper_balance[quote] = self._paper_balance.get(quote, 0) + cost
+            self._paper_balance[quote] = self._paper_balance.get(quote, 0) + proceeds
+
+        self._total_fees_paid += fee
 
         logger.info(
-            "PAPER ORDER | %s %s %.6f @ $%.2f (cost=$%.2f) | balances=%s",
+            "PAPER ORDER | %s %s %.6f @ $%.2f (cost=$%.2f fee=$%.2f) | balances=%s",
             side,
             pair,
             quantity,
             price,
             cost,
+            fee,
             self._paper_balance,
         )
         return OrderResult(
@@ -251,5 +272,6 @@ class BrokerTool:
             side=side,
             quantity=quantity,
             price=price,
-            message=f"Paper {side} filled at ${price:.2f}",
+            fee_usd=fee,
+            message=f"Paper {side} filled at ${price:.2f} (fee: ${fee:.2f})",
         )
