@@ -38,7 +38,13 @@ class MarketDataTool:
     # ------------------------------------------------------------------ #
     def get_current_price(self, pair: str) -> float:
         if self._client is not None:
-            return self._fetch_live_price(pair)
+            price = self._fetch_live_price(pair)
+            if price > 0:
+                return price
+            # Fallback to simulation when API fails (e.g. paper mode)
+            if self._config.trading_mode.value == "paper":
+                return self._simulate_price(pair)
+            return 0.0
         return self._simulate_price(pair)
 
     def get_candles(
@@ -48,7 +54,13 @@ class MarketDataTool:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         if self._client is not None:
-            return self._fetch_live_candles(pair, granularity, limit)
+            candles = self._fetch_live_candles(pair, granularity, limit)
+            if candles:
+                return candles
+            # Fallback to simulation when API fails (e.g. paper mode)
+            if self._config.trading_mode.value == "paper":
+                return self._generate_paper_candles(pair, limit)
+            return []
         return self._generate_paper_candles(pair, limit)
 
     def get_ticker(self, pair: str) -> dict[str, Any]:
